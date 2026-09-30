@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub Pages 私人图床 (支持裁剪)</title>
+    <!-- 引入裁剪库 Cropper.js -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.13/cropper.min.css" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.5.13/cropper.min.js"></script>
+    <style>
+        :root { --primary: #8b5cf6; --bg: #f3f4f6; --card: #ffffff; }
+        body { font-family: system-ui, sans-serif; background: var(--bg); margin: 0; padding: 20px; color: #333; }
+        .container { max-width: 1000px; margin: 0 auto; }
+        .header { background: linear-gradient(135deg, #8b5cf6, #6d28d9); color: white; padding: 20px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); display: flex; justify-content: space-between; align-items: center; }
+        .token-setup input { padding: 8px; border-radius: 6px; border: none; width: 250px; outline: none; }
+        .btn { padding: 8px 16px; background: white; color: var(--primary); border: none; border-radius: 6px; cursor: pointer; font-weight: bold; transition: 0.2s; }
+        .btn:hover { background: #f0f0f0; }
+        .btn-primary { background: var(--primary); color: white; }
+        .btn-primary:hover { background: #7c3aed; }
+        .btn-danger { background: #ef4444; color: white; }
+        
+        .upload-area { border: 2px dashed #cbd5e1; background: var(--card); padding: 40px; text-align: center; border-radius: 12px; cursor: pointer; margin-bottom: 20px; transition: 0.3s; }
+        .upload-area:hover { border-color: var(--primary); }
+        .upload-area input[type="file"] { display: none; }
+        
+        /* 裁剪弹窗 */
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; }
+        .modal-content { background: white; padding: 20px; border-radius: 12px; width: 90%; max-width: 800px; text-align: center; }
+        .crop-container { width: 100%; max-height: 500px; margin: 15px 0; background: #eee; }
+        .crop-container img { max-width: 100%; display: block; }
+        
+        .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 15px; }
+        .card { background: var(--card); border-radius: 10px; padding: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); text-align: center; }
+        .card img { width: 100%; height: 150px; object-fit: cover; border-radius: 6px; margin-bottom: 10px; }
+        .card audio { width: 100%; margin-bottom: 10px; }
+        .card-title { font-size: 12px; color: #666; margin-bottom: 10px; word-break: break-all; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .card-actions { display: flex; gap: 5px; flex-wrap: wrap; justify-content: center; }
+        .card-actions button { flex: 1; min-width: 60px; font-size: 12px; padding: 5px; border-radius: 4px; border: none; cursor: pointer; }
+        .link-input { width: 100%; padding: 5px; box-sizing: border-box; margin-bottom: 10px; font-size: 12px; border: 1px solid #ddd; border-radius: 4px; }
+        
+        #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #333; color: white; padding: 10px 20px; border-radius: 6px; display: none; z-index: 2000; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header">
+        <h2>我的云端图床</h2>
+        <div class="token-setup">
+            <input type="password" id="tokenInput" placeholder="请输入 GitHub Token (ghp_...)">
+            <button class="btn" onclick="saveToken()">保存 Token</button>
+            <button class="btn" onclick="loadGallery()">刷新图库</button>
+        </div>
+    </div>
+
+    <div class="upload-area" id="dropZone" onclick="document.getElementById('fileInput').click()">
+        <h3>点击或拖拽文件到这里上传 (支持多选)</h3>
+        <p>支持图片 (弹出裁剪) 和 音频 (直接上传)</p>
+        <input type="file" id="fileInput" multiple accept="image/jpeg,image/png,image/gif,image/webp,image/svg+xml,image/bmp,image/x-icon,audio/mp3,audio/wav,audio/m4a,audio/ogg,audio/flac,audio/aac">
+    </div>
+
+    <div class="gallery" id="gallery"></div>
+</div>
+
+<!-- 裁剪弹窗 -->
+<div class="modal" id="cropModal">
+    <div class="modal-content">
+        <h3>裁剪图片 (<span id="cropQueueText"></span>)</h3>
+        <div class="crop-container">
+            <img id="cropImage" src="" alt="待裁剪图片">
+        </div>
+        <button class="btn btn-primary" onclick="confirmCrop()">确认裁剪并上传</button>
+        <button class="btn btn-danger" onclick="skipCrop()">跳过此图</button>
+    </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+    // ================= 配置区 =================
+    // 请在此处替换为你的 GitHub 信息
+    const GITHUB_USER = 'xiaoyu23014'; 
+    const GITHUB_REPO = 'xiaoyu';
+    const BRANCH = 'main';
+    // ==========================================
+
+    const BASE_URL = `https://api.github.com/repos/${GITHUB_USER}/${GITHUB_REPO}/contents/`;
+    const PAGE_URL = `https://${GITHUB_USER}.github.io/${GITHUB_REPO}/`;
+
+    let cropper = null;
+    let fileQueue = [];
+    let currentFile = null;
+
+    // 初始化
+    window.onload = () => {
+        const token = localStorage.getItem('gh_token');
+        if (token) {
+            document.getElementById('tokenInput').value = token;
+            loadGallery();
+        }
+        setupDragAndDrop();
+    };
+
+    function showToast(msg) {
+        const toast = document.getElementById('toast');
+        toast.textContent = msg;
+        toast.style.display = 'block';
+        setTimeout(() => toast.style.display = 'none', 3000);
+    }
+
+    function saveToken() {
+        const val = document.getElementById('tokenInput').value.trim();
+        if (val) {
+            localStorage.setItem('gh_token', val);
+            showToast('Token 已保存');
+            loadGallery();
+        }
+    }
+
+    function getHeaders() {
+        const token = localStorage.getItem('gh_token');
+        return {
+            'Authorization': `token ${token}`,
+            'Content-Type': 'application/json'
+        };
+    }
+
+    // 拖拽与文件选择设置
+    function setupDragAndDrop() {
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+
+        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.style.borderColor = '#8b5cf6'; });
+        dropZone.addEventListener('dragleave', () => dropZone.style.borderColor = '#cbd5e1');
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault(); dropZone.style.borderColor = '#cbd5e1';
+            handleFiles(e.dataTransfer.files);
+        });
+        fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
+    }
+
+    // 处理选中的文件（加入队列）
+    function handleFiles(files) {
+        if (!localStorage.getItem('gh_token')) return showToast('请先填写并保存 Token！');
+        if (files.length === 0) return;
+        
+        fileQueue = Array.from(files);
+        processNextFile();
+    }
+
+    // 处理队列中的下一个文件
+    function processNextFile() {
+        if (fileQueue.length === 0) {
+            showToast('所有文件处理完毕！');
+            document.getElementById('fileInput').value = '';
+            loadGallery();
+            return;
+        }
+
+        currentFile = fileQueue.shift();
+        
+        // 如果是音频，直接上传
+        if (currentFile.type.startsWith('audio/')) {
+            showToast(`正在上传音频: ${currentFile.name}...`);
+            uploadDirectly(currentFile);
+        } else if (currentFile.type.startsWith('image/')) {
+            // 如果是图片，打开裁剪器
+            openCropper(currentFile, fileQueue.length);
+        } else {
+            showToast(`不支持的文件格式: ${currentFile.name}`);
+            processNextFile();
+        }
+    }
+
+    // 打开裁剪器
+    function openCropper(file, remaining) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            document.getElementById('cropQueueText').innerText = `剩余待处理: ${remaining} 张`;
+            const image = document.getElementById('cropImage');
+            image.src = e.target.result;
+            document.getElementById('cropModal').style.display = 'flex';
+
+            if (cropper) cropper.destroy();
+            cropper = new Cropper(image, {
+                viewMode: 1,
+                autoCropArea: 1,
+                background: false
+            });
+        };
+        reader.readAsDataURL(file);
+    }
+
+    // 确认裁剪并上传
+    function confirmCrop() {
+        if (!cropper) return;
+        const canvas = cropper.getCroppedCanvas();
+        const base64Str = canvas.toDataURL(currentFile.type).split(',')[1]; 
+        
+        document.getElementById('cropModal').style.display = 'none';
+        showToast(`正在上传: ${currentFile.name}...`);
+        
+        uploadToGitHub(generateSafeName(currentFile.name), base64Str);
+    }
+
+    // 跳过裁剪
+    function skipCrop() {
+        document.getElementById('cropModal').style.display = 'none';
+        processNextFile();
+    }
+
+    // 直接上传（针对音频）
+    function uploadDirectly(file) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const base64Str = e.target.result.split(',')[1];
+            uploadToGitHub(generateSafeName(file.name), base64Str);
+        };
+        reader.readAsDataURL(file);
+    }
+
+    // 生成安全的文件名 (加时间戳防止重名)
+    function generateSafeName(originalName) {
+        const ext = originalName.split('.').pop();
+        const name = originalName.substring(0, originalName.lastIndexOf('.'));
+        return `${name}_${new Date().getTime()}.${ext}`;
+    }
+
+    // 上传到 GitHub API
+    async function uploadToGitHub(filename, base64Content) {
+        try {
+            const res = await fetch(BASE_URL + encodeURIComponent(filename), {
+                method: 'PUT',
+                headers: getHeaders(),
+                body: JSON.stringify({
+                    message: `Upload ${filename}`,
+                    content: base64Content,
+                    branch: BRANCH
+                })
+            });
+            if (res.ok) {
+                showToast(`上传成功: ${filename}`);
+            } else {
+                const err = await res.json();
+                showToast(`上传失败: ${err.message}`);
+            }
+        } catch (error) {
+            showToast('网络错误');
+        }
+        // 继续处理下一个文件
+        processNextFile();
+    }
+
+    // 加载图库
+    async function loadGallery() {
+        if (!localStorage.getItem('gh_token')) return;
+        showToast('正在加载图库...');
+        try {
+            const res = await fetch(BASE_URL + `?ref=${BRANCH}`, { headers: getHeaders() });
+            if (!res.ok) throw new Error('读取仓库失败，请检查Token或仓库信息');
+            const files = await res.json();
+            
+            const gallery = document.getElementById('gallery');
+            gallery.innerHTML = '';
+            
+            // 过滤出文件并按时间倒序排（GitHub API默认不排序，我们反转一下数组粗略实现新图在前）
+            files.filter(f => f.type === 'file').reverse().forEach(file => {
+                const ext = file.name.split('.').pop().toLowerCase();
+                const isImage = ['jpg','jpeg','png','gif','webp','svg','bmp','ico'].includes(ext);
+                const isAudio = ['mp3','wav','m4a','ogg','flac','aac'].includes(ext);
+                
+                if (!isImage && !isAudio) return;
+
+                const fileUrl = PAGE_URL + encodeURIComponent(file.name);
+                
+                const card = document.createElement('div');
+                card.className = 'card';
+                card.innerHTML = `
+                    ${isImage ? `<img src="${fileUrl}" loading="lazy">` : `<audio controls src="${fileUrl}"></audio>`}
+                    <div class="card-title" title="${file.name}">${file.name}</div>
+                    <input type="text" class="link-input" value="${fileUrl}" readonly>
+                    <div class="card-actions">
+                        <button class="btn" style="background:#e5e7eb" onclick="copyText('${fileUrl}')">复制</button>
+                        <button class="btn" style="background:#dbeafe; color:#2563eb" onclick="window.open('${fileUrl}')">打开</button>
+                        <button class="btn btn-danger" onclick="deleteFile('${file.name}', '${file.sha}')">删除</button>
+                    </div>
+                `;
+                gallery.appendChild(card);
+            });
+            showToast('加载完成');
+        } catch (err) {
+            showToast(err.message);
+        }
+    }
+
+    function copyText(text) {
+        navigator.clipboard.writeText(text).then(() => showToast('外链已复制到剪贴板！'));
+    }
+
+    async function deleteFile(filename, sha) {
+        if (!confirm(`确定要删除 ${filename} 吗？不可恢复！`)) return;
+        showToast('正在删除...');
+        try {
+            const res = await fetch(BASE_URL + encodeURIComponent(filename), {
+                method: 'DELETE',
+                headers: getHeaders(),
+                body: JSON.stringify({
+                    message: `Delete ${filename}`,
+                    sha: sha,
+                    branch: BRANCH
+                })
+            });
+            if (res.ok) {
+                showToast('删除成功');
+                loadGallery();
+            } else {
+                showToast('删除失败');
+            }
+        } catch (error) {
+            showToast('网络错误');
+        }
+    }
+</script>
+</body>
+</html>
